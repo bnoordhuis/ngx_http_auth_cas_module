@@ -3,7 +3,7 @@
 #include <ngx_http.h>
 
 typedef struct {
-	ngx_str_t auth_cas;
+	ngx_flag_t auth_cas;
 	ngx_str_t auth_cas_login_url;
 } ngx_http_auth_cas_ctx_t;
 
@@ -12,7 +12,7 @@ ngx_module_t ngx_http_auth_cas_module;
 static ngx_int_t ngx_http_auth_cas_handler(ngx_http_request_t *r) {
 	const ngx_http_auth_cas_ctx_t *ctx = ngx_http_get_module_loc_conf(r, ngx_http_auth_cas_module);
 
-	if (!ctx->auth_cas.data) {
+	if (ctx->auth_cas == NGX_CONF_UNSET || ctx->auth_cas == 0) {
 		return NGX_DECLINED;
 	}
 
@@ -21,7 +21,10 @@ static ngx_int_t ngx_http_auth_cas_handler(ngx_http_request_t *r) {
 
 static void *ngx_http_auth_cas_create_loc_conf(ngx_conf_t *cf) {
 	ngx_http_auth_cas_ctx_t *ctx = ngx_pcalloc(cf->pool, sizeof(*ctx));
+
+	ctx->auth_cas = NGX_CONF_UNSET;
 	ngx_str_null(&ctx->auth_cas_login_url);
+
 	return ctx;
 }
 
@@ -29,9 +32,8 @@ static char *ngx_http_auth_cas_merge_loc_conf(ngx_conf_t *cf, void *parent, void
 	const ngx_http_auth_cas_ctx_t *prev = parent;
 	ngx_http_auth_cas_ctx_t *conf = child;
 
-	if (conf->auth_cas.data == NULL) {
-		conf->auth_cas = prev->auth_cas;
-	}
+	ngx_conf_merge_value(conf->auth_cas, prev->auth_cas, 0);
+
 	if (conf->auth_cas_login_url.data == NULL) {
 		conf->auth_cas_login_url = prev->auth_cas_login_url;
 	}
@@ -55,7 +57,7 @@ static ngx_command_t commands[] = {
 	{
 		ngx_string("auth_cas"),
 		NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_HTTP_LMT_CONF | NGX_CONF_TAKE1,
-		ngx_conf_set_str_slot,
+		ngx_conf_set_flag_slot,
 		NGX_HTTP_LOC_CONF_OFFSET,
 		offsetof(ngx_http_auth_cas_ctx_t, auth_cas),
 		NULL
