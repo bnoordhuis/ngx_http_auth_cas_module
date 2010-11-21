@@ -2,31 +2,72 @@
 #include <ngx_core.h>
 #include <ngx_http.h>
 
-#define CAS_SERVICE_PARAM	"?service="
+#include <ctype.h>
+
+#define CAS_SERVICE_PARAM  "?service="
+#define CAS_COOKIE_NAME    "CASC"
 
 typedef struct {
+	/* CAS authentication required? */
 	ngx_flag_t auth_cas;
 
+	/* name of service ticket cookie */
+	ngx_str_t auth_cas_cookie;
+
+	/* CAS server login URL */
 	ngx_str_t auth_cas_login_url;
 
-	/* don't reconstruct service URL from Host header, see https://wiki.jasig.org/display/CASC/CASFilter */
+	/* our base URL - don't reconstruct service URL from Host header, see https://wiki.jasig.org/display/CASC/CASFilter */
 	ngx_str_t auth_cas_service_url;
 } ngx_http_auth_cas_ctx_t;
 
 ngx_module_t ngx_http_auth_cas_module;
 
-static const char *find_cookie(const ngx_http_request_t *r, const char *name) {
-	const ngx_table_elt_t **cookies = r->headers_in.cookies.elts;
-	int i, n_cookies = r->headers_in.cookies.nelts;
+static int find_cookie(ngx_http_request_t *r, ngx_str_t name, ngx_str_t *value) {
+	const ngx_table_elt_t *cookie = *(ngx_table_elt_t **) r->headers_in.cookies.elts;
+	int nelts;
 
-	for (i = 0; i < n_cookies; i++) {
-		const ngx_table_elt_t *elt = cookies[i];
-		if (ngx_strcmp(elt->key.data, name) == 0) {
-			return (const char *) elt->value.data;
+	for (nelts = r->headers_in.cookies.nelts; nelts > 0; nelts--, cookie++) {
+		u_char *start = cookie->value.data;
+		u_char *end   = cookie->value.data + cookie->value.len;
+
+		while (start < end) {
+			/* skip leading whitespace */
+			while (isspace((*start))) start++;
+
+			u_char *equals_sign = memchr(start, '=', end - start);
+			if (equals_sign == NULL) {
+				break;
+			}
+
+			u_char *val = equals_sign + 1;
+			u_char *semicolon = memchr(val, ';', end - val);
+
+			if ((size_t) (equals_sign - start) == name.len
+				&& ngx_memcmp(start, name.data, name.len) == 0)
+			{
+				value->len = end - val;
+				if (!semicolon) {
+					value->data = val;
+				} else {
+					/* part of a "foo=42; bar=1337" string, make a copy */
+					if (NULL == (value->data = ngx_pnalloc(r->pool, value->len + 1))) {
+						return 0;
+					}
+					*(ngx_cpymem(value->data, val, value->len)) = '\0';
+				}
+				return 1;
+			}
+
+			if (semicolon) {
+				start = semicolon + 1;
+			} else {
+				break;
+			}
 		}
 	}
 
-	return NULL;
+	return 0;
 }
 
 static ngx_int_t send_redirect(ngx_http_request_t *r, const ngx_str_t location) {
@@ -73,8 +114,9 @@ static ngx_int_t ngx_http_auth_cas_handler(ngx_http_request_t *r) {
 		return NGX_DECLINED;
 	}
 
-	const char *ticket = find_cookie(r, "CASC");
-	if (!ticket) {
+	ngx_str_t cookie = ngx_null_string;
+
+	if (!find_cookie(r, ctx->auth_cas_cookie, &cookie)) {
 		/* redirect to CAS server */
 		ngx_str_t location;
 
@@ -106,6 +148,7 @@ static void *ngx_http_auth_cas_create_loc_conf(ngx_conf_t *cf) {
 	ctx->auth_cas = NGX_CONF_UNSET;
 	ngx_str_null(&ctx->auth_cas_login_url);
 	ngx_str_null(&ctx->auth_cas_service_url);
+	ngx_str_null(&ctx->auth_cas_cookie);
 
 	return ctx;
 }
@@ -115,6 +158,7 @@ static char *ngx_http_auth_cas_merge_loc_conf(ngx_conf_t *cf, void *parent, void
 	ngx_http_auth_cas_ctx_t *conf = child;
 
 	ngx_conf_merge_value(conf->auth_cas, prev->auth_cas, 0);
+	ngx_conf_merge_str_value(conf->auth_cas_cookie, prev->auth_cas_cookie, CAS_COOKIE_NAME);
 
 	if (conf->auth_cas_login_url.data == NULL) {
 		conf->auth_cas_login_url = prev->auth_cas_login_url;
@@ -146,6 +190,14 @@ static ngx_command_t commands[] = {
 		ngx_conf_set_flag_slot,
 		NGX_HTTP_LOC_CONF_OFFSET,
 		offsetof(ngx_http_auth_cas_ctx_t, auth_cas),
+		NULL
+	},
+	{
+		ngx_string("auth_cas_cookie"),
+		NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_HTTP_LMT_CONF | NGX_CONF_TAKE1,
+		ngx_conf_set_str_slot,
+		NGX_HTTP_LOC_CONF_OFFSET,
+		offsetof(ngx_http_auth_cas_ctx_t, auth_cas_cookie),
 		NULL
 	},
 	{
