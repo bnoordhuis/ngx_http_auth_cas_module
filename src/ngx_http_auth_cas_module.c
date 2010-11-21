@@ -88,19 +88,35 @@ static ngx_int_t send_redirect(ngx_http_request_t *r, const ngx_str_t location) 
 static int create_login_url(ngx_http_request_t *r, ngx_str_t *s) {
 	const ngx_http_auth_cas_ctx_t *ctx = ngx_http_get_module_loc_conf(r, ngx_http_auth_cas_module);
 
-	s->len = ctx->auth_cas_login_url.len + sizeof(CAS_SERVICE_PARAM) + ctx->auth_cas_service_url.len + (r->uri.len * 3);
+	s->len = ctx->auth_cas_login_url.len
+			+ sizeof(CAS_SERVICE_PARAM)
+			+ ctx->auth_cas_service_url.len
+			+ (r->uri.len * 3)
+			+ 3 /* %3F == '?' */
+			+ (r->args.len * 3);
+
 	s->data = ngx_pnalloc(r->pool, s->len);
 
 	if (!s->data) {
 		return 0;
 	}
 
-	/* TODO preserve query string */
 	u_char *p = s->data;
 	p = ngx_cpymem(p, ctx->auth_cas_login_url.data, ctx->auth_cas_login_url.len);
 	p = ngx_cpymem(p, CAS_SERVICE_PARAM, sizeof(CAS_SERVICE_PARAM) - 1);
 	p = ngx_cpymem(p, ctx->auth_cas_service_url.data, ctx->auth_cas_service_url.len);
 	p = (u_char *) ngx_escape_uri(p, r->uri.data, r->uri.len, NGX_ESCAPE_ARGS);
+
+	/* nginx stores the path and query string as a single string so that
+	 * (r->uri.data + r->uri.len + 1) == r->args.data but is that a stable API?
+	 */
+	if (r->args.len) {
+		*p++ = '%';
+		*p++ = '3';
+		*p++ = 'F';
+		p = (u_char *) ngx_escape_uri(p, r->args.data, r->args.len, NGX_ESCAPE_ARGS);
+	}
+
 	*p = '\0';
 
 	s->len = p - s->data;
