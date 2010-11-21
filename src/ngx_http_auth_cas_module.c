@@ -71,18 +71,22 @@ static int find_cookie(ngx_http_request_t *r, ngx_str_t name, ngx_str_t *value) 
 }
 
 static ngx_int_t send_redirect(ngx_http_request_t *r, const ngx_str_t location) {
-	ngx_table_elt_t *loc = ngx_list_push(&r->headers_out.headers);
-
-	if (loc == NULL) {
+	if (NULL == (r->headers_out.location = ngx_list_push(&r->headers_out.headers))) {
 		return NGX_HTTP_INTERNAL_SERVER_ERROR;
 	}
 
-	loc->hash = 1;
-	ngx_str_set(&loc->key, "Location");
-	loc->value = location;
-	r->headers_out.location = loc;
+	r->headers_out.location->hash = 1;
+	r->headers_out.location->value = location;
+	ngx_str_set(&r->headers_out.location->key, "Location");
 
 	return NGX_HTTP_MOVED_TEMPORARILY;
+}
+
+static ngx_int_t send_reload(ngx_http_request_t *r) {
+	ngx_str_t location;
+	location.data = r->uri.data;
+	location.len = r->uri.len + 1 + r->args.len;
+	return send_redirect(r, location);
 }
 
 static int create_login_url(ngx_http_request_t *r, ngx_str_t *s) {
@@ -105,29 +109,62 @@ static int create_login_url(ngx_http_request_t *r, ngx_str_t *s) {
 	p = ngx_cpymem(p, ctx->auth_cas_login_url.data, ctx->auth_cas_login_url.len);
 	p = ngx_cpymem(p, CAS_SERVICE_PARAM, sizeof(CAS_SERVICE_PARAM) - 1);
 	p = ngx_cpymem(p, ctx->auth_cas_service_url.data, ctx->auth_cas_service_url.len);
-	p = (u_char *) ngx_escape_uri(p, r->uri.data, r->uri.len, NGX_ESCAPE_ARGS);
-
-	/* nginx stores the path and query string as a single string so that
-	 * (r->uri.data + r->uri.len + 1) == r->args.data but is that a stable API?
-	 */
-	if (r->args.len) {
-		*p++ = '%';
-		*p++ = '3';
-		*p++ = 'F';
-		p = (u_char *) ngx_escape_uri(p, r->args.data, r->args.len, NGX_ESCAPE_ARGS);
-	}
-
+	p = (u_char *) ngx_escape_uri(p, r->uri.data, r->uri.len + 1 + r->args.len, NGX_ESCAPE_ARGS);
 	*p = '\0';
 
 	s->len = p - s->data;
 
 	return 1;
 }
+
+/* is there a proxy or service ticket in the query string?
+ * CAS tickets always starts with "PT-" or "ST-", see https://issues.jasig.org/browse/MAS-44
+ */
+static ngx_int_t scan_and_remove_ticket(ngx_http_request_t *r, ngx_str_t *ticket) {
+	if (ngx_http_arg(r, (u_char *) "ticket", sizeof("ticket") - 1, ticket) == NGX_OK
+		&& ticket->len > 3
+		&& (ticket->data[0] == 'P' || ticket->data[0] == 'S')
+		&& ticket->data[1] == 'T'
+		&& ticket->data[2] == '-')
+	{
+		/* remove ticket from query string */
+		if (r->args.data + r->args.len == ticket->data + ticket->len) {
+			if (r->args.data == ticket->data) {
+				/* only argument */
+				r->args.len = 0;
+			} else {
+				/* last argument */
+				r->args.len -= ticket->len + sizeof("ticket") + 1;	/* ?ticket= or &ticket= */
+			}
+		} else {
+			/* move trailing arguments */
+			u_char *src = ticket->data + ticket->len + 1;
+			u_char *dst = ticket->data - sizeof("ticket");
+			size_t size = (r->args.data + r->args.len) - src;
+			r->args.len = ngx_cpymem(dst, src, size) - r->args.data;
+		}
+
+		return 1;
+	}
+
+	return 0;
+}
+
 static ngx_int_t ngx_http_auth_cas_handler(ngx_http_request_t *r) {
 	const ngx_http_auth_cas_ctx_t *ctx = ngx_http_get_module_loc_conf(r, ngx_http_auth_cas_module);
 
 	if (!ctx->auth_cas) {
 		return NGX_DECLINED;
+	}
+
+	/* is there a proxy ticket or service ticket in the query string?
+	 * CAS tickets always starts with "PT-" or "ST-"
+	 * see https://issues.jasig.org/browse/MAS-44
+	 */
+	ngx_str_t ticket = ngx_null_string;
+
+	if (scan_and_remove_ticket(r, &ticket)) {
+		return send_reload(r);
 	}
 
 	ngx_str_t cookie = ngx_null_string;
