@@ -89,32 +89,35 @@ static ngx_int_t send_reload(ngx_http_request_t *r) {
 	return send_redirect(r, location);
 }
 
-static int create_login_url(ngx_http_request_t *r, ngx_str_t *s) {
+static ngx_int_t send_login_redirect(ngx_http_request_t *r) {
 	const ngx_http_auth_cas_ctx_t *ctx = ngx_http_get_module_loc_conf(r, ngx_http_auth_cas_module);
 
-	s->len = ctx->auth_cas_login_url.len
+	ngx_str_t location;
+
+	location.len = ctx->auth_cas_login_url.len
 			+ sizeof(CAS_SERVICE_PARAM)
 			+ ctx->auth_cas_service_url.len
 			+ (r->uri.len * 3)
 			+ 3 /* %3F == '?' */
 			+ (r->args.len * 3);
 
-	s->data = ngx_pnalloc(r->pool, s->len);
+	location.data = ngx_pnalloc(r->pool, location.len);
 
-	if (!s->data) {
-		return 0;
+	if (!location.data) {
+		return NGX_HTTP_INTERNAL_SERVER_ERROR;
 	}
 
-	u_char *p = s->data;
+	u_char *p = location.data;
 	p = ngx_cpymem(p, ctx->auth_cas_login_url.data, ctx->auth_cas_login_url.len);
 	p = ngx_cpymem(p, CAS_SERVICE_PARAM, sizeof(CAS_SERVICE_PARAM) - 1);
 	p = ngx_cpymem(p, ctx->auth_cas_service_url.data, ctx->auth_cas_service_url.len);
 	p = (u_char *) ngx_escape_uri(p, r->uri.data, r->uri.len + 1 + r->args.len, NGX_ESCAPE_ARGS);
 	*p = '\0';
 
-	s->len = p - s->data;
+	location.len = p - location.data;
 
-	return 1;
+	return send_redirect(r, location);
+
 }
 
 /* is there a proxy or service ticket in the query string?
@@ -157,10 +160,6 @@ static ngx_int_t ngx_http_auth_cas_handler(ngx_http_request_t *r) {
 		return NGX_DECLINED;
 	}
 
-	/* is there a proxy ticket or service ticket in the query string?
-	 * CAS tickets always starts with "PT-" or "ST-"
-	 * see https://issues.jasig.org/browse/MAS-44
-	 */
 	ngx_str_t ticket = ngx_null_string;
 
 	if (scan_and_remove_ticket(r, &ticket)) {
@@ -170,14 +169,7 @@ static ngx_int_t ngx_http_auth_cas_handler(ngx_http_request_t *r) {
 	ngx_str_t cookie = ngx_null_string;
 
 	if (!find_cookie(r, ctx->auth_cas_cookie, &cookie)) {
-		/* redirect to CAS server */
-		ngx_str_t location;
-
-		if (!create_login_url(r, &location)) {
-			return NGX_HTTP_INTERNAL_SERVER_ERROR;
-		}
-
-		return send_redirect(r, location);
+		return send_login_redirect(r);
 	}
 
 	return NGX_HTTP_UNAUTHORIZED;
