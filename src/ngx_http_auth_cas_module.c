@@ -19,6 +19,9 @@ typedef struct {
 
 	/* our base URL - don't reconstruct service URL from Host header, see https://wiki.jasig.org/display/CASC/CASFilter */
 	ngx_str_t auth_cas_service_url;
+
+	/* CAS server ticket validation URL (SAML and regular) */
+	ngx_str_t auth_cas_validate_url;
 } ngx_http_auth_cas_ctx_t;
 
 ngx_module_t ngx_http_auth_cas_module;
@@ -213,6 +216,10 @@ static char *ngx_http_auth_cas_merge_loc_conf(ngx_conf_t *cf, void *parent, void
 		conf->auth_cas_service_url = prev->auth_cas_service_url;
 	}
 
+	if (conf->auth_cas_validate_url.data == NULL) {
+		conf->auth_cas_validate_url = prev->auth_cas_validate_url;
+	}
+
 	return NGX_CONF_OK;
 }
 
@@ -246,11 +253,11 @@ static ngx_command_t commands[] = {
 		NULL
 	},
 	{
-		ngx_string("auth_cas_login_url"),
+		ngx_string("auth_cas_validate_url"),
 		NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_HTTP_LMT_CONF | NGX_CONF_TAKE1,
 		ngx_conf_set_str_slot,
 		NGX_HTTP_LOC_CONF_OFFSET,
-		offsetof(ngx_http_auth_cas_ctx_t, auth_cas_login_url),
+		offsetof(ngx_http_auth_cas_ctx_t, auth_cas_validate_url),
 		NULL
 	},
 	{
@@ -259,6 +266,14 @@ static ngx_command_t commands[] = {
 		set_auth_cas_service_url,
 		NGX_HTTP_LOC_CONF_OFFSET,
 		offsetof(ngx_http_auth_cas_ctx_t, auth_cas_service_url),
+		NULL
+	},
+	{
+		ngx_string("auth_cas_login_url"),
+		NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_HTTP_LMT_CONF | NGX_CONF_TAKE1,
+		ngx_conf_set_str_slot,
+		NGX_HTTP_LOC_CONF_OFFSET,
+		offsetof(ngx_http_auth_cas_ctx_t, auth_cas_login_url),
 		NULL
 	},
 	ngx_null_command
