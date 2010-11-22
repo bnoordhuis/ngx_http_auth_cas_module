@@ -156,6 +156,32 @@ static ngx_int_t scan_and_remove_ticket(ngx_http_request_t *r, ngx_str_t *ticket
 	return 0;
 }
 
+static ngx_int_t ngx_http_auth_cas_create_request(ngx_http_request_t *r) {
+	return NGX_OK;
+}
+
+static ngx_int_t ngx_http_auth_cas_reinit_request(ngx_http_request_t *r) {
+	return NGX_OK;
+}
+
+static ngx_int_t ngx_http_auth_cas_process_header(ngx_http_request_t *r) {
+	return NGX_OK;
+}
+
+static void ngx_http_auth_cas_abort_request(ngx_http_request_t *r) {
+}
+
+static void ngx_http_auth_cas_finalize_request(ngx_http_request_t *r, ngx_int_t rc) {
+	send_reload(r);
+}
+
+static ngx_int_t ngx_http_auth_cas_input_filter(ngx_event_pipe_t *p, ngx_buf_t *buf) {
+	u_char chunk[1 + (buf->last - buf->start)];
+	*(ngx_cpymem(chunk, buf->start, buf->last - buf->start)) = '\0';
+	fprintf(stderr, "chunk: %s\n", chunk);
+	return NGX_OK;
+}
+
 static ngx_int_t ngx_http_auth_cas_handler(ngx_http_request_t *r) {
 	const ngx_http_auth_cas_ctx_t *ctx = ngx_http_get_module_loc_conf(r, ngx_http_auth_cas_module);
 
@@ -166,7 +192,33 @@ static ngx_int_t ngx_http_auth_cas_handler(ngx_http_request_t *r) {
 	ngx_str_t ticket = ngx_null_string;
 
 	if (scan_and_remove_ticket(r, &ticket)) {
-		return send_reload(r);
+		if (ngx_http_upstream_create(r) != NGX_OK) {
+			return NGX_HTTP_INTERNAL_SERVER_ERROR;
+		}
+
+		ngx_http_upstream_t *u = r->upstream;
+
+		/* TODO append service and ticket parameters */
+		u->uri = ctx->auth_cas_validate_url;
+
+		u->method.len = sizeof("POST") - 1;
+		u->method.data = (u_char *) "POST";
+
+		u->output.tag = (ngx_buf_tag_t) &ngx_http_auth_cas_module;
+		u->create_request   = ngx_http_auth_cas_create_request;
+		u->reinit_request   = ngx_http_auth_cas_reinit_request;
+		u->process_header   = ngx_http_auth_cas_process_header;
+		u->abort_request    = ngx_http_auth_cas_abort_request;
+		u->finalize_request = ngx_http_auth_cas_finalize_request;
+
+		u->pipe->input_filter = ngx_http_auth_cas_input_filter;
+		ngx_int_t rc = ngx_http_read_client_request_body(r, ngx_http_upstream_init);
+
+		if (rc >= NGX_HTTP_SPECIAL_RESPONSE) {
+			return rc;
+		}
+
+		return NGX_DONE;
 	}
 
 	ngx_str_t cookie = ngx_null_string;
