@@ -211,7 +211,11 @@ static ngx_int_t ngx_http_auth_cas_handler(ngx_http_request_t *r) {
 		u->abort_request    = ngx_http_auth_cas_abort_request;
 		u->finalize_request = ngx_http_auth_cas_finalize_request;
 
+		if (NULL == (u->pipe = ngx_pcalloc(r->pool, sizeof(*u->pipe)))) {
+			return NGX_HTTP_INTERNAL_SERVER_ERROR;
+		}
 		u->pipe->input_filter = ngx_http_auth_cas_input_filter;
+
 		ngx_int_t rc = ngx_http_read_client_request_body(r, ngx_http_upstream_init);
 
 		if (rc >= NGX_HTTP_SPECIAL_RESPONSE) {
