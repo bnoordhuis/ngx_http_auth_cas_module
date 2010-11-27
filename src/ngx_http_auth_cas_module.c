@@ -195,6 +195,76 @@ static ngx_int_t ngx_http_auth_cas_input_filter(ngx_event_pipe_t *p, ngx_buf_t *
 	return NGX_OK;
 }
 
+static ngx_int_t ngx_http_auth_cas_start_validation(ngx_http_request_t *r, ngx_str_t ticket) {
+	const ngx_http_auth_cas_ctx_t *ctx = ngx_http_get_module_loc_conf(r, ngx_http_auth_cas_module);
+
+	if (ngx_http_upstream_create(r) != NGX_OK) {
+		return NGX_HTTP_INTERNAL_SERVER_ERROR;
+	}
+
+	ngx_http_upstream_conf_t *conf = ngx_pcalloc(r->pool, sizeof(*conf));
+	if (conf == NULL) {
+		return NGX_HTTP_INTERNAL_SERVER_ERROR;
+	}
+
+	conf->upstream = ctx->uscf;
+
+	/* FIXME make configurable */
+	conf->buffering = 1;
+
+	conf->connect_timeout = 60000;
+	conf->send_timeout = 60000;
+	conf->read_timeout = 60000;
+
+	conf->send_lowat = 0;
+	conf->buffer_size = (size_t) ngx_pagesize;
+
+	conf->busy_buffers_size_conf = 2 * (size_t) ngx_pagesize;
+	conf->temp_file_write_size_conf = 2 * (size_t) ngx_pagesize;
+	conf->max_temp_file_size_conf = 1024 * 1024;
+
+	/*
+	conf->pass_request_headers = NGX_CONF_UNSET;
+	conf->pass_request_body = NGX_CONF_UNSET;
+
+	conf->hide_headers = NGX_CONF_UNSET_PTR;
+	conf->pass_headers = NGX_CONF_UNSET_PTR;
+
+	conf->intercept_errors = NGX_CONF_UNSET;
+	conf->cyclic_temp_file = 0;
+	*/
+
+	ngx_http_upstream_t *u = r->upstream;
+
+	u->conf             = conf;
+	u->output.tag       = (ngx_buf_tag_t) &ngx_http_auth_cas_module;
+	u->create_request   = ngx_http_auth_cas_create_request;
+	u->reinit_request   = ngx_http_auth_cas_reinit_request;
+	u->process_header   = ngx_http_auth_cas_process_header;
+	u->abort_request    = ngx_http_auth_cas_abort_request;
+	u->finalize_request = ngx_http_auth_cas_finalize_request;
+
+	if (NULL == (u->pipe = ngx_pcalloc(r->pool, sizeof(*u->pipe)))) {
+		return NGX_HTTP_INTERNAL_SERVER_ERROR;
+	}
+	u->pipe->input_filter = ngx_http_auth_cas_input_filter;
+
+	ngx_http_upstream_resolved_t *ur = ngx_pcalloc(r->pool, sizeof(*ur));
+	if (ur == NULL) {
+		return NGX_HTTP_INTERNAL_SERVER_ERROR;
+	}
+
+	u->resolved = ur;
+
+	ngx_int_t rc = ngx_http_read_client_request_body(r, ngx_http_upstream_init);
+
+	if (rc >= NGX_HTTP_SPECIAL_RESPONSE) {
+		return rc;
+	}
+
+	return NGX_DONE;
+}
+
 static ngx_int_t ngx_http_auth_cas_handler(ngx_http_request_t *r) {
 	const ngx_http_auth_cas_ctx_t *ctx = ngx_http_get_module_loc_conf(r, ngx_http_auth_cas_module);
 
@@ -205,62 +275,7 @@ static ngx_int_t ngx_http_auth_cas_handler(ngx_http_request_t *r) {
 	ngx_str_t ticket = ngx_null_string;
 
 	if (scan_and_remove_ticket(r, &ticket)) {
-		if (ngx_http_upstream_create(r) != NGX_OK) {
-			return NGX_HTTP_INTERNAL_SERVER_ERROR;
-		}
-
-		ngx_http_upstream_t *u = r->upstream;
-
-		u->output.tag = (ngx_buf_tag_t) &ngx_http_auth_cas_module;
-		u->create_request   = ngx_http_auth_cas_create_request;
-		u->reinit_request   = ngx_http_auth_cas_reinit_request;
-		u->process_header   = ngx_http_auth_cas_process_header;
-		u->abort_request    = ngx_http_auth_cas_abort_request;
-		u->finalize_request = ngx_http_auth_cas_finalize_request;
-
-		ngx_http_upstream_conf_t *conf = u->conf = ngx_pcalloc(r->pool, sizeof(*conf));
-		if (conf == NULL) {
-			return NGX_HTTP_INTERNAL_SERVER_ERROR;
-		}
-
-		/* FIXME make ocnfigurable */
-		conf->buffering = 1;
-
-		conf->connect_timeout = 60000;
-		conf->send_timeout = 60000;
-		conf->read_timeout = 60000;
-
-		conf->send_lowat = 0;
-		conf->buffer_size = (size_t) ngx_pagesize;
-
-		conf->busy_buffers_size_conf = 2 * (size_t) ngx_pagesize;
-		conf->temp_file_write_size_conf = 2 * (size_t) ngx_pagesize;
-		conf->max_temp_file_size_conf = 1024 * 1024;
-
-		/*
-		conf->pass_request_headers = NGX_CONF_UNSET;
-		conf->pass_request_body = NGX_CONF_UNSET;
-
-		conf->hide_headers = NGX_CONF_UNSET_PTR;
-		conf->pass_headers = NGX_CONF_UNSET_PTR;
-
-		conf->intercept_errors = NGX_CONF_UNSET;
-		*/
-
-		conf->cyclic_temp_file = 0;
-
-		if (NULL == (u->pipe = ngx_pcalloc(r->pool, sizeof(*u->pipe)))) {
-			return NGX_HTTP_INTERNAL_SERVER_ERROR;
-		}
-		u->pipe->input_filter = ngx_http_auth_cas_input_filter;
-
-		ngx_int_t rc = ngx_http_read_client_request_body(r, ngx_http_upstream_init);
-
-		if (rc >= NGX_HTTP_SPECIAL_RESPONSE) {
-			return rc;
-		}
-
-		return NGX_DONE;
+		return ngx_http_auth_cas_start_validation(r, ticket);
 	}
 
 	ngx_str_t cookie = ngx_null_string;
@@ -337,8 +352,9 @@ static char *ngx_http_auth_cas_merge_loc_conf(ngx_conf_t *cf, void *parent, void
 			return NGX_CONF_ERROR;
 		}
 
-		uscf->peer.init = ngx_http_upstream_init_round_robin_peer;
-		uscf->peer.init_upstream = ngx_http_upstream_init_round_robin;
+		if (ngx_http_upstream_init_round_robin(cf, uscf) != NGX_OK) {
+			return NGX_CONF_ERROR;
+		}
 
 		conf->uscf = uscf;
 	}
