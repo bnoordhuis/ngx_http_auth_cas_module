@@ -74,13 +74,17 @@ static int find_cookie(ngx_http_request_t *r, ngx_str_t name, ngx_str_t *value) 
 }
 
 static ngx_int_t send_redirect(ngx_http_request_t *r, const ngx_str_t location) {
-	if (NULL == (r->headers_out.location = ngx_list_push(&r->headers_out.headers))) {
-		return NGX_HTTP_INTERNAL_SERVER_ERROR;
+	ngx_table_elt_t *loc;
+
+	loc = r->headers_out.location = ngx_list_push(&r->headers_out.headers);
+	if (loc == NULL) {
+		return NGX_ERROR;
 	}
 
-	r->headers_out.location->hash = 1;
-	r->headers_out.location->value = location;
-	ngx_str_set(&r->headers_out.location->key, "Location");
+	loc->key.data = (u_char *) "Location";
+	loc->key.len  = sizeof("Location") - 1;
+	loc->value    = location;
+	loc->hash     = 1;
 
 	return NGX_HTTP_MOVED_TEMPORARILY;
 }
