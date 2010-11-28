@@ -160,42 +160,6 @@ static ngx_int_t scan_and_remove_ticket(ngx_http_request_t *r, ngx_str_t *ticket
 	return 0;
 }
 
-static ngx_int_t ngx_http_auth_cas_validate_ticket_post_subrequest(ngx_http_request_t *r, void *data, ngx_int_t rc) {
-	return NGX_OK;
-}
-
-static ngx_int_t ngx_http_auth_cas_validate_ticket(ngx_http_request_t *r, ngx_str_t ticket) {
-	ngx_http_auth_cas_ctx_t *ctx = ngx_http_get_module_loc_conf(r, ngx_http_auth_cas_module);
-
-	ngx_http_post_subrequest_t *psr = ngx_pcalloc(r->pool, sizeof(*psr));
-	if (psr == NULL) {
-		return NGX_ERROR;
-	}
-
-	psr->handler = ngx_http_auth_cas_validate_ticket_post_subrequest;
-
-	ngx_str_t args;
-	ngx_str_set(&args, "service=http://localhost:8081/protected/&ticket=ST-1234");
-
-	ngx_http_request_t *sr;
-
-	ngx_int_t rc = ngx_http_subrequest(r, &ctx->auth_cas_validate_url, &args, &sr, psr,
-		  NGX_HTTP_SUBREQUEST_IN_MEMORY
-		| NGX_HTTP_SUBREQUEST_WAITED
-		| NGX_HTTP_LOG_UNSAFE);
-
-	if (rc == NGX_ERROR || rc == NGX_DONE) {
-		return rc;
-	}
-
-	sr->request_body = ngx_pcalloc(r->pool, sizeof(*sr->request_body));
-	if (sr->request_body == NULL) {
-		return NGX_ERROR;
-	}
-
-	return NGX_DONE;
-}
-
 static ngx_int_t ngx_http_auth_cas_handler(ngx_http_request_t *r) {
 	const ngx_http_auth_cas_ctx_t *ctx = ngx_http_get_module_loc_conf(r, ngx_http_auth_cas_module);
 
@@ -203,27 +167,18 @@ static ngx_int_t ngx_http_auth_cas_handler(ngx_http_request_t *r) {
 		return NGX_DECLINED;
 	}
 
-	/*
-	ngx_str_t ticket = ngx_null_string;
-
-	if (scan_and_remove_ticket(r, &ticket)) {
-		(void) send_reload;
-		return ngx_http_auth_cas_validate_ticket(r, ticket);
-	}
-
-	ngx_str_t cookie = ngx_null_string;
-
-	if (!find_cookie(r, ctx->auth_cas_cookie, &cookie)) {
-		return send_login_redirect(r);
-	}
-
-	return NGX_HTTP_UNAUTHORIZED;
-	*/
-
 	ngx_str_t uri; ngx_str_set(&uri, "/validate");
 	ngx_str_t args; ngx_str_set(&args, "service=http://localhost:8081/protected/&ticket=ST-1337");
 
-	return ngx_http_internal_redirect(r, &uri, &args);
+	ngx_http_request_t *sr = NULL;
+
+	ngx_int_t rc = ngx_http_subrequest(r, &uri, &args, &sr, NULL, 0);
+	if (rc != NGX_OK) {
+		return NGX_ERROR;
+	}
+
+	ngx_str_t loc; ngx_str_set(&loc, "http://www.google.com");
+	return send_redirect(r, loc);
 }
 
 static char *set_auth_cas_service_url(ngx_conf_t *cf, ngx_command_t *cmd, void *conf) {
