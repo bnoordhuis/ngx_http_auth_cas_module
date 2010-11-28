@@ -27,6 +27,11 @@ typedef struct {
 	ngx_http_upstream_conf_t upstream;
 } ngx_http_auth_cas_loc_conf_t;
 
+/* used when validating a service ticket */
+typedef struct {
+	ngx_http_status_t status;
+} ngx_http_auth_cas_validation_ctx_t;
+
 ngx_module_t ngx_http_auth_cas_module;
 
 static ngx_int_t ngx_http_auth_cas_create_request(ngx_http_request_t *r);
@@ -176,16 +181,11 @@ static ngx_int_t scan_and_remove_ticket(ngx_http_request_t *r, ngx_str_t *ticket
 }
 
 static ngx_int_t ngx_http_auth_cas_create_request(ngx_http_request_t *r) {
-	ngx_http_upstream_t *u = r->upstream;
-
-	r->method = NGX_HTTP_GET;
-
-	u->uri.data = (u_char *) "/validate?service=http://localhost:8081/protected/&ticket=ST-1337";
-	u->uri.len = strlen((char *) u->uri.data);
-
-	return NGX_OK;
-
-#define CASC_REQUEST "/validate?service=http://localhost:8081/protected/&ticket=ST-1337"
+	/* TODO create a real request */
+#define CASC_REQUEST \
+	"GET /validate?service=http://localhost:8081/protected/&ticket=ST-1337 HTTP/1.0" CRLF \
+	"Host: localhost:8080" CRLF \
+	CRLF
 
 	ngx_buf_t *b = ngx_create_temp_buf(r->pool, sizeof(CASC_REQUEST) - 1);
 	if (b == NULL) {
@@ -216,22 +216,16 @@ static ngx_int_t ngx_http_auth_cas_reinit_request(ngx_http_request_t *r) {
 }
 
 static ngx_int_t ngx_http_auth_cas_process_status_line(ngx_http_request_t *r) {
+	ngx_http_auth_cas_validation_ctx_t *ctx = ngx_http_get_module_ctx(r, ngx_http_auth_cas_module);
+
 	ngx_http_upstream_t *u = r->upstream;
 
-	ngx_http_status_t status;
-	ngx_memzero(&status, sizeof(status));
-
-	ngx_int_t rc = ngx_http_parse_status_line(r, &u->buffer, &status);
-
-	if (rc == NGX_AGAIN) {
+	ngx_int_t rc = ngx_http_parse_status_line(r, &u->buffer, &ctx->status);
+	if (rc == NGX_AGAIN || rc == NGX_ERROR) {
 		return rc;
 	}
 
-	if (rc == NGX_ERROR) {
-		return NGX_ERROR;
-	}
-
-	fprintf(stderr, "status.code=%ld\n", status.code);
+	u->headers_in.status_n = ctx->status.code;
 
 	u->process_header = ngx_http_auth_cas_process_header;
 
@@ -239,7 +233,23 @@ static ngx_int_t ngx_http_auth_cas_process_status_line(ngx_http_request_t *r) {
 }
 
 static ngx_int_t ngx_http_auth_cas_process_header(ngx_http_request_t *r) {
-	return NGX_OK;
+	while (1) {
+		ngx_int_t rc = ngx_http_parse_header_line(r, &r->upstream->buffer, 1);
+
+		if (rc == NGX_OK) {
+			continue;
+		}
+
+		if (rc == NGX_AGAIN) {
+			return NGX_AGAIN;
+		}
+
+		if (rc == NGX_HTTP_PARSE_HEADER_DONE) {
+			return NGX_OK;
+		}
+
+		return NGX_HTTP_UPSTREAM_INVALID_HEADER;
+	}
 }
 
 static void ngx_http_auth_cas_abort_request(ngx_http_request_t *r) {
@@ -255,11 +265,14 @@ static ngx_int_t ngx_http_auth_cas_handler(ngx_http_request_t *r) {
 		return NGX_DECLINED;
 	}
 
-	if (ngx_http_upstream_create(r)) {
+	if (ngx_http_upstream_create(r) != NGX_OK) {
 		return NGX_HTTP_INTERNAL_SERVER_ERROR;
 	}
 
-	ngx_http_set_ctx(r, "context comes here", ngx_http_auth_cas_module);
+	/* contains the state machine that parses the CAS server response */
+	ngx_http_auth_cas_validation_ctx_t *ctx = ngx_pcalloc(r->pool, sizeof(*ctx));
+
+	ngx_http_set_ctx(r, ctx, ngx_http_auth_cas_module);
 
 	ngx_http_upstream_t *u = r->upstream;
 	if (u == NULL) {
