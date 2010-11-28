@@ -666,6 +666,10 @@ static char *ngx_http_auth_cas_merge_loc_conf(ngx_conf_t *cf, void *parent, void
 		conf->auth_cas_validate_url = prev->auth_cas_validate_url;
 	}
 
+	if (conf->upstream.upstream == NULL) {
+		conf->upstream.upstream = prev->upstream.upstream;
+	}
+
 	return ngx_http_auth_cas_merge_upstream(cf, prev, conf);
 }
 
