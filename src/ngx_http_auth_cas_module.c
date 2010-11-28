@@ -11,6 +11,9 @@ typedef struct {
 	/* CAS authentication required? */
 	ngx_flag_t auth_cas;
 
+	/* CAS authentication required? */
+	ngx_flag_t auth_cas_validate;
+
 	/* name of service ticket cookie */
 	ngx_str_t auth_cas_cookie;
 
@@ -22,9 +25,21 @@ typedef struct {
 
 	/* CAS server ticket validation URL (SAML and regular) */
 	ngx_str_t auth_cas_validate_url;
+
+	/* upstream config of the CAS server */
+	ngx_http_upstream_conf_t *upstream;
 } ngx_http_auth_cas_ctx_t;
 
 ngx_module_t ngx_http_auth_cas_module;
+
+static ngx_int_t ngx_http_auth_cas_create_request(ngx_http_request_t *r);
+static ngx_int_t ngx_http_auth_cas_reinit_request(ngx_http_request_t *r);
+static ngx_int_t ngx_http_auth_cas_process_status_line(ngx_http_request_t *r);
+static ngx_int_t ngx_http_auth_cas_process_header(ngx_http_request_t *r);
+static void ngx_http_auth_cas_abort_request(ngx_http_request_t *r);
+static void ngx_http_auth_cas_finalize_request(ngx_http_request_t *r, ngx_int_t rc);
+
+static ngx_int_t ngx_http_auth_cas_handler(ngx_http_request_t *r);
 
 static int find_cookie(ngx_http_request_t *r, ngx_str_t name, ngx_str_t *value) {
 	const ngx_table_elt_t *cookie = *(ngx_table_elt_t **) r->headers_in.cookies.elts;
@@ -160,25 +175,91 @@ static ngx_int_t scan_and_remove_ticket(ngx_http_request_t *r, ngx_str_t *ticket
 	return 0;
 }
 
-static ngx_int_t ngx_http_auth_cas_handler(ngx_http_request_t *r) {
-	const ngx_http_auth_cas_ctx_t *ctx = ngx_http_get_module_loc_conf(r, ngx_http_auth_cas_module);
+static ngx_int_t ngx_http_auth_cas_create_request(ngx_http_request_t *r) {
+	return NGX_ERROR;
+}
 
-	if (!ctx->auth_cas) {
-		return NGX_DECLINED;
+static ngx_int_t ngx_http_auth_cas_reinit_request(ngx_http_request_t *r) {
+	ngx_http_upstream_t *u = r->upstream;
+
+	u->process_header = ngx_http_auth_cas_process_status_line;
+
+	return NGX_ERROR;
+}
+
+static ngx_int_t ngx_http_auth_cas_process_status_line(ngx_http_request_t *r) {
+	ngx_http_upstream_t *u = r->upstream;
+
+	ngx_http_status_t status;
+	ngx_memzero(&status, sizeof(status));
+
+	ngx_int_t rc = ngx_http_parse_status_line(r, &u->buffer, &status);
+
+	if (rc == NGX_AGAIN) {
+		return rc;
 	}
 
-	ngx_str_t uri; ngx_str_set(&uri, "/validate");
-	ngx_str_t args; ngx_str_set(&args, "service=http://localhost:8081/protected/&ticket=ST-1337");
-
-	ngx_http_request_t *sr = NULL;
-
-	ngx_int_t rc = ngx_http_subrequest(r, &uri, &args, &sr, NULL, 0);
-	if (rc != NGX_OK) {
+	if (rc == NGX_ERROR) {
 		return NGX_ERROR;
 	}
 
-	ngx_str_t loc; ngx_str_set(&loc, "http://www.google.com");
-	return send_redirect(r, loc);
+	fprintf(stderr, "status.code=%ld\n", status.code);
+
+	u->process_header = ngx_http_auth_cas_process_header;
+
+	return ngx_http_auth_cas_process_header(r);
+}
+
+static ngx_int_t ngx_http_auth_cas_process_header(ngx_http_request_t *r) {
+	return NGX_ERROR;
+}
+
+static void ngx_http_auth_cas_abort_request(ngx_http_request_t *r) {
+}
+
+static void ngx_http_auth_cas_finalize_request(ngx_http_request_t *r, ngx_int_t rc) {
+}
+
+static ngx_int_t ngx_http_auth_cas_handler(ngx_http_request_t *r) {
+	fputs(__func__, stderr);
+
+	ngx_http_auth_cas_ctx_t *mlcf = ngx_http_get_module_loc_conf(r, ngx_http_auth_cas_module);
+
+	if (!mlcf->auth_cas_validate) {
+		return NGX_DECLINED;
+	}
+
+	if (ngx_http_upstream_create(r)) {
+		return NGX_HTTP_INTERNAL_SERVER_ERROR;
+	}
+
+	ngx_http_set_ctx(r, "context comes here", ngx_http_auth_cas_module);
+
+	ngx_http_upstream_t *u = r->upstream;
+	if (u == NULL) {
+		return NGX_ERROR;
+	}
+
+	u->conf = mlcf->upstream;
+
+	u->peer.log = r->connection->log;
+	u->peer.log_error = NGX_ERROR_ERR;
+
+	u->output.tag = (ngx_buf_tag_t) &ngx_http_auth_cas_module;
+
+	u->create_request   = ngx_http_auth_cas_create_request;
+	u->reinit_request   = ngx_http_auth_cas_reinit_request;
+	u->process_header   = ngx_http_auth_cas_process_header;
+	u->abort_request    = ngx_http_auth_cas_abort_request;
+	u->finalize_request = ngx_http_auth_cas_finalize_request;
+
+	ngx_int_t rc = ngx_http_read_client_request_body(r, ngx_http_upstream_init);
+
+	if (rc >= NGX_HTTP_SPECIAL_RESPONSE) {
+		return rc;
+	}
+
+	return NGX_DONE;
 }
 
 static char *set_auth_cas_service_url(ngx_conf_t *cf, ngx_command_t *cmd, void *conf) {
@@ -194,14 +275,49 @@ static char *set_auth_cas_service_url(ngx_conf_t *cf, ngx_command_t *cmd, void *
 	return NGX_CONF_OK;
 }
 
-static void *ngx_http_auth_cas_create_loc_conf(ngx_conf_t *cf) {
-	ngx_http_auth_cas_ctx_t *ctx = ngx_pcalloc(cf->pool, sizeof(*ctx));
+static char *set_auth_cas_validate_url(ngx_conf_t *cf, ngx_command_t *cmd, void *conf) {
+	ngx_http_auth_cas_ctx_t *mlcf = conf;
 
-	ctx->auth_cas = NGX_CONF_UNSET;
+	if (mlcf->upstream->upstream) {
+		return "is duplicate";
+	}
+
+	ngx_http_core_loc_conf_t *clcf = ngx_http_conf_get_module_loc_conf(cf, ngx_http_core_module);
+
+	clcf->handler = ngx_http_auth_cas_handler;
+
+	ngx_str_t *value = (ngx_str_t *) cf->args->elts + 1;
+	ngx_str_set(value, "cas/validate");
+
+	ngx_url_t u;
+	ngx_memzero(&u, sizeof(u));
+
+	u.url = *value;
+	u.uri_part = 1;
+	u.no_resolve = 1;
+	u.default_port = 8080;
+
+	mlcf->upstream->upstream = ngx_http_upstream_add(cf, &u, 0);
+
+	if (mlcf->upstream->upstream == NULL) {
+		return NGX_CONF_ERROR;
+	}
+
+	return NGX_CONF_OK;
+}
+
+static void *ngx_http_auth_cas_create_loc_conf(ngx_conf_t *cf) {
+	ngx_http_auth_cas_ctx_t *ctx = ngx_pcalloc(cf->pool, sizeof(*ctx) + sizeof(*ctx->upstream));
+
 	ngx_str_null(&ctx->auth_cas_validate_url);
 	ngx_str_null(&ctx->auth_cas_service_url);
 	ngx_str_null(&ctx->auth_cas_login_url);
 	ngx_str_null(&ctx->auth_cas_cookie);
+
+	ctx->auth_cas_validate = NGX_CONF_UNSET;
+	ctx->auth_cas = NGX_CONF_UNSET;
+
+	ctx->upstream = (void *) (ctx + 1);
 
 	return ctx;
 }
@@ -211,6 +327,7 @@ static char *ngx_http_auth_cas_merge_loc_conf(ngx_conf_t *cf, void *parent, void
 	ngx_http_auth_cas_ctx_t *conf = child;
 
 	ngx_conf_merge_value(conf->auth_cas, prev->auth_cas, 0);
+	ngx_conf_merge_value(conf->auth_cas_validate, prev->auth_cas_validate, 0);
 	ngx_conf_merge_str_value(conf->auth_cas_cookie, prev->auth_cas_cookie, CAS_COOKIE_NAME);
 
 	if (conf->auth_cas_login_url.data == NULL) {
@@ -225,6 +342,10 @@ static char *ngx_http_auth_cas_merge_loc_conf(ngx_conf_t *cf, void *parent, void
 		conf->auth_cas_validate_url = prev->auth_cas_validate_url;
 	}
 
+	if (conf->upstream == NULL) {
+		conf->upstream = prev->upstream;
+	}
+
 	return NGX_CONF_OK;
 }
 
@@ -235,10 +356,44 @@ static ngx_int_t ngx_http_auth_cas_init(ngx_conf_t *cf) {
 	if (handler == NULL) {
 		return NGX_ERROR;
 	}
+
 	*handler = ngx_http_auth_cas_handler;
 
 	return NGX_OK;
 }
+
+static char *ngx_http_auth_cas_post_validate(ngx_conf_t *cf, void *post, void *data) {
+	ngx_http_auth_cas_ctx_t *mlcf = ngx_http_conf_get_module_loc_conf(cf, ngx_http_auth_cas_module);
+
+	if (mlcf->upstream->upstream) {
+		return "is duplicate";
+	}
+
+	ngx_http_core_loc_conf_t *clcf = ngx_http_conf_get_module_loc_conf(cf, ngx_http_core_module);
+
+	clcf->handler = ngx_http_auth_cas_handler;
+
+	ngx_str_t *value = (ngx_str_t *) cf->args->elts + 1;
+	ngx_str_set(value, "cas/validate");
+
+	ngx_url_t u;
+	ngx_memzero(&u, sizeof(u));
+
+	u.url = *value;
+	u.uri_part = 1;
+	u.no_resolve = 1;
+	u.default_port = 8080;
+
+	mlcf->upstream->upstream = ngx_http_upstream_add(cf, &u, 0);
+
+	if (mlcf->upstream->upstream == NULL) {
+		return NGX_CONF_ERROR;
+	}
+
+	return NGX_CONF_OK;
+}
+
+static ngx_conf_post_handler_pt ngx_http_auth_cas_post_validate_pt = ngx_http_auth_cas_post_validate;
 
 static ngx_command_t commands[] = {
 	{
@@ -248,6 +403,14 @@ static ngx_command_t commands[] = {
 		NGX_HTTP_LOC_CONF_OFFSET,
 		offsetof(ngx_http_auth_cas_ctx_t, auth_cas),
 		NULL
+	},
+	{
+		ngx_string("auth_cas_validate"),
+		NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_HTTP_LMT_CONF | NGX_CONF_TAKE1,
+		ngx_conf_set_flag_slot,
+		NGX_HTTP_LOC_CONF_OFFSET,
+		offsetof(ngx_http_auth_cas_ctx_t, auth_cas_validate),
+		&ngx_http_auth_cas_post_validate_pt
 	},
 	{
 		ngx_string("auth_cas_cookie"),
@@ -261,6 +424,9 @@ static ngx_command_t commands[] = {
 		ngx_string("auth_cas_validate_url"),
 		NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_HTTP_LMT_CONF | NGX_CONF_TAKE1,
 		ngx_conf_set_str_slot,
+		/*
+		set_auth_cas_validate_url,
+		*/
 		NGX_HTTP_LOC_CONF_OFFSET,
 		offsetof(ngx_http_auth_cas_ctx_t, auth_cas_validate_url),
 		NULL
