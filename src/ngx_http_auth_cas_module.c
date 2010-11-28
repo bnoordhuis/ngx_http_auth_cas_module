@@ -110,8 +110,8 @@ static ngx_int_t send_login_redirect(ngx_http_request_t *r) {
 
 	location.data = ngx_pnalloc(r->pool, location.len);
 
-	if (!location.data) {
-		return NGX_HTTP_INTERNAL_SERVER_ERROR;
+	if (location.data == NULL) {
+		return NGX_ERROR;
 	}
 
 	u_char *p = location.data;
