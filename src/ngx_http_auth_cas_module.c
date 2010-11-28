@@ -203,6 +203,7 @@ static ngx_int_t ngx_http_auth_cas_handler(ngx_http_request_t *r) {
 		return NGX_DECLINED;
 	}
 
+	/*
 	ngx_str_t ticket = ngx_null_string;
 
 	if (scan_and_remove_ticket(r, &ticket)) {
@@ -217,6 +218,12 @@ static ngx_int_t ngx_http_auth_cas_handler(ngx_http_request_t *r) {
 	}
 
 	return NGX_HTTP_UNAUTHORIZED;
+	*/
+
+	ngx_str_t uri; ngx_str_set(&uri, "/validate");
+	ngx_str_t args; ngx_str_set(&args, "service=http://localhost:8081/protected/&ticket=ST-1337");
+
+	return ngx_http_internal_redirect(r, &uri, &args);
 }
 
 static char *set_auth_cas_service_url(ngx_conf_t *cf, ngx_command_t *cmd, void *conf) {
