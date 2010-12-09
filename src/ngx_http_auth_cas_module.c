@@ -4,6 +4,8 @@
 
 #include <ctype.h>
 
+#include <expat.h>
+
 #define CAS_SERVICE_PARAM  "?service="
 #define CAS_COOKIE_NAME    "CASC"
 
@@ -30,9 +32,15 @@ typedef struct {
 /* used when validating a service ticket */
 typedef struct {
 	ngx_http_status_t status;
+
+	/* SAX parser for the SAML response */
+	XML_Parser parser;
 } ngx_http_auth_cas_validation_ctx_t;
 
 ngx_module_t ngx_http_auth_cas_module;
+
+static ngx_http_output_header_filter_pt ngx_http_next_header_filter;
+static ngx_http_output_body_filter_pt ngx_http_next_body_filter;
 
 static ngx_int_t ngx_http_auth_cas_create_request(ngx_http_request_t *r);
 static ngx_int_t ngx_http_auth_cas_reinit_request(ngx_http_request_t *r);
@@ -43,6 +51,9 @@ static void ngx_http_auth_cas_finalize_request(ngx_http_request_t *r, ngx_int_t 
 
 static void *ngx_http_auth_cas_create_upstream(ngx_conf_t *cf, ngx_http_auth_cas_loc_conf_t *conf);
 static char *ngx_http_auth_cas_merge_upstream(ngx_conf_t *cf, ngx_http_auth_cas_loc_conf_t *prev, ngx_http_auth_cas_loc_conf_t *conf);
+
+static ngx_int_t ngx_http_auth_cas_header_filter(ngx_http_request_t *r);
+static ngx_int_t ngx_http_auth_cas_body_filter(ngx_http_request_t *r, ngx_chain_t *in);
 
 static ngx_int_t ngx_http_auth_cas_handler(ngx_http_request_t *r);
 
@@ -258,6 +269,57 @@ static void ngx_http_auth_cas_abort_request(ngx_http_request_t *r) {
 static void ngx_http_auth_cas_finalize_request(ngx_http_request_t *r, ngx_int_t rc) {
 }
 
+static ngx_int_t ngx_http_auth_cas_header_filter(ngx_http_request_t *r) {
+	return ngx_http_next_header_filter(r);
+}
+
+static const char *cstring(ngx_http_request_t *r, u_char *first, u_char *last) {
+	size_t size = 1 + (last - first);
+
+	u_char *s = ngx_palloc(r->pool, size);
+	if (s != NULL) {
+		*(ngx_cpymem(s, first, size)) = '\0';
+	}
+
+	return (const char *) s;
+}
+
+static ngx_int_t ngx_http_auth_cas_body_filter(ngx_http_request_t *r, ngx_chain_t *in) {
+	ngx_http_auth_cas_validation_ctx_t *ctx = ngx_http_get_module_ctx(r, ngx_http_auth_cas_module);
+
+	if (ctx == NULL || in == NULL) {
+		return ngx_http_next_body_filter(r, in);
+	}
+
+	ngx_buf_t *b = in->buf;
+
+	if (b->pos) {
+		fprintf(stderr, "%ld bytes of data: %s\n", b->last - b->pos, cstring(r, b->pos, b->last));
+
+		if (XML_Parse(ctx->parser, (const char *) b->pos, b->last - b->pos, 0) == XML_STATUS_ERROR) {
+			fprintf(stderr, "XML parse error: %s\n",
+				XML_ErrorString(XML_GetErrorCode(ctx->parser)));
+
+			/* XXX maybe add an error flag to ngx_http_auth_cas_validation_ctx_t? */
+			ngx_http_set_ctx(r, NULL, ngx_http_auth_cas_module);
+		}
+
+		/* cheap hack to prevent the upstream response from being sent to the client,
+		 * nginx doesn't like empty buffers so leave in a single newline
+		 */
+		b->pos = (u_char *) "\n";
+		b->last = b->pos + 1;
+	}
+
+	return ngx_http_next_body_filter(r, in);
+}
+
+static void ngx_http_auth_cas_validation_cleanup(void *data) {
+	ngx_http_auth_cas_validation_ctx_t *ctx = data;
+
+	XML_ParserFree(ctx->parser);
+}
+
 static ngx_int_t ngx_http_auth_cas_handler(ngx_http_request_t *r) {
 	ngx_http_auth_cas_loc_conf_t *mlcf = ngx_http_get_module_loc_conf(r, ngx_http_auth_cas_module);
 
@@ -271,6 +333,16 @@ static ngx_int_t ngx_http_auth_cas_handler(ngx_http_request_t *r) {
 
 	/* contains the state machine that parses the CAS server response */
 	ngx_http_auth_cas_validation_ctx_t *ctx = ngx_pcalloc(r->pool, sizeof(*ctx));
+
+	ctx->parser = XML_ParserCreateNS(NULL, '\0');
+
+	ngx_pool_cleanup_t *cleanup = ngx_pool_cleanup_add(r->pool, 0);
+	if (cleanup == NULL) {
+		return NGX_ERROR;
+	}
+
+	cleanup->handler = ngx_http_auth_cas_validation_cleanup;
+	cleanup->data = ctx;
 
 	ngx_http_set_ctx(r, ctx, ngx_http_auth_cas_module);
 
@@ -661,6 +733,12 @@ static ngx_int_t ngx_http_auth_cas_init(ngx_conf_t *cf) {
 	}
 
 	*handler = ngx_http_auth_cas_handler;
+
+	ngx_http_next_header_filter = ngx_http_top_header_filter;
+	ngx_http_top_header_filter = ngx_http_auth_cas_header_filter;
+
+	ngx_http_next_body_filter = ngx_http_top_body_filter;
+	ngx_http_top_body_filter = ngx_http_auth_cas_body_filter;
 
 	return NGX_OK;
 }
