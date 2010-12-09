@@ -3,4 +3,7 @@ ngx_addon_name=ngx_http_auth_cas_module
 NGX_ADDON_SRCS="$NGX_ADDON_SRCS $ngx_addon_dir/src/ngx_http_auth_cas_module.c"
 HTTP_AUX_FILTER_MODULES="$HTTP_AUX_FILTER_MODULES ngx_http_auth_cas_module"
 
+# TODO check if libexpat headers are installed
+CORE_LIBS="$CORE_LIBS -lexpat"
+
 have=NGX_AUTH_CAS_MODULE . auto/have
